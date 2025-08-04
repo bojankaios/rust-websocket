@@ -526,6 +526,10 @@ impl<'u> ClientBuilder<'u> {
 	///
 	/// If you have non-default SSL circumstances, you can use the `ssl_config`
 	/// parameter to configure those.
+	/// 
+	/// Note that if URL contains a hostname (like in the example below), it
+	/// uses only one of the resolved IP addresses, without ["happy eyeballs"](https://datatracker.ietf.org/doc/html/rfc8305).
+	/// This may lead to failures to connect to e.g. `ws://localhost`. 
 	///
 	///# Example
 	///
@@ -568,6 +572,55 @@ impl<'u> ClientBuilder<'u> {
 	) -> r#async::ClientNew<Box<dyn stream::r#async::Stream + Send>> {
 		// connect to the tcp stream
 		let tcp_stream = self.async_tcpstream(None);
+
+		let builder = ClientBuilder {
+			url: Cow::Owned(self.url.into_owned()),
+			version: self.version,
+			headers: self.headers,
+			version_set: self.version_set,
+			key_set: self.key_set,
+			max_dataframe_size: self.max_dataframe_size,
+			max_message_size: self.max_message_size,
+		};
+
+		// check if we should connect over ssl or not
+		if builder.is_secure_url() {
+			// configure the tls connection
+			let (host, connector) = {
+				match builder.extract_host_ssl_conn(ssl_config) {
+					Ok((h, conn)) => (h.to_string(), TlsConnectorExt::from(conn)),
+					Err(e) => return Box::new(future::err(e)),
+				}
+			};
+			// secure connection, wrap with ssl
+			let future = tcp_stream
+				.and_then(move |s| connector.connect(&host, s).map_err(towse))
+				.and_then(move |stream| {
+					let stream: Box<dyn stream::r#async::Stream + Send> = Box::new(stream);
+					builder.async_connect_on(stream)
+				});
+			Box::new(future)
+		} else {
+			// insecure connection, connect normally
+			let future = tcp_stream.and_then(move |stream| {
+				let stream: Box<dyn stream::r#async::Stream + Send> = Box::new(stream);
+				builder.async_connect_on(stream)
+			});
+			Box::new(future)
+		}
+	}
+
+	/// Similar to [`async_connect`], but allowing to hook into
+	/// getting tokio::TcpStream from an iterator of `SocketAddr`s,
+	/// to allow implenting ["happy eyeballs"](https://datatracker.ietf.org/doc/html/rfc8305).
+	#[cfg(feature = "async-ssl")]
+	pub fn async_connect_with_cb(
+		self,
+		ssl_config: Option<TlsConnector>,
+		cb: impl FnOnce(url::SocketAddrs) -> Box<dyn future::Future<Item=TcpStreamNew, Error=WebSocketError> + Send>,
+	) -> r#async::ClientNew<Box<dyn stream::r#async::Stream + Send>> {
+		// connect to the tcp stream
+		let tcp_stream = self.async_tcpstream_with_cb(None, cb);
 
 		let builder = ClientBuilder {
 			url: Cow::Owned(self.url.into_owned()),
@@ -840,6 +893,22 @@ impl<'u> ClientBuilder<'u> {
 		Box::new(TcpStreamNew::connect(&address).map_err(Into::into))
 	}
 
+	#[cfg(feature = "async")]
+	fn async_tcpstream_with_cb(
+		&self,
+		secure: Option<bool>,
+		cb: impl FnOnce(url::SocketAddrs) -> Box<dyn future::Future<Item=TcpStreamNew, Error=WebSocketError> + Send>,
+	) -> Box<dyn future::Future<Item = TcpStreamNew, Error = WebSocketError> + Send> {
+		// get the address to connect to, return an error future if ther's a problem
+		match self
+			.extract_host_port(secure)
+			.and_then(|p| Ok(p.to_socket_addrs()?))
+		{
+			Ok(s) => cb(s),
+			Err(e) => return Box::new(Err(e).into_future()),
+		}
+	}
+
 	#[cfg(any(feature = "sync", feature = "async"))]
 	fn build_request(&mut self) -> String {
 		// enter host if available (unix sockets don't have hosts)
@@ -863,7 +932,7 @@ impl<'u> ClientBuilder<'u> {
 
 		self.headers
 			.set(Connection(vec![ConnectionOption::ConnectionHeader(
-				UniCase("Upgrade".to_string()),
+				UniCase::ascii("Upgrade".to_string()),
 			)]));
 
 		self.headers.set(Upgrade(vec![Protocol {
@@ -926,7 +995,7 @@ impl<'u> ClientBuilder<'u> {
 
 		if self.headers.get()
 			!= Some(
-				&(Connection(vec![ConnectionOption::ConnectionHeader(UniCase(
+				&(Connection(vec![ConnectionOption::ConnectionHeader(UniCase::ascii(
 					"Upgrade".to_string(),
 				))])),
 			) {

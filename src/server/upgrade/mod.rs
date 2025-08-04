@@ -154,7 +154,7 @@ where
 		self.headers.set(WebSocketAccept::new(key));
 		self.headers
 			.set(Connection(vec![ConnectionOption::ConnectionHeader(
-				UniCase("Upgrade".to_string()),
+				UniCase::ascii("Upgrade".to_string()),
 			)]));
 		self.headers
 			.set(Upgrade(vec![Protocol::new(ProtocolName::WebSocket, None)]));
@@ -285,7 +285,7 @@ pub fn validate(
 	fn check_connection_header(headers: &[ConnectionOption]) -> bool {
 		for header in headers {
 			if let ConnectionOption::ConnectionHeader(ref h) = *header {
-				if UniCase(h as &str) == UniCase("upgrade") {
+				if UniCase::ascii(h as &str) == UniCase::ascii("upgrade") {
 					return true;
 				}
 			}
