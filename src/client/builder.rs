@@ -10,8 +10,8 @@ use std::borrow::Cow;
 use std::convert::Into;
 pub use url::{ParseError, Url};
 
-const DEFAULT_MAX_DATAFRAME_SIZE : usize = 1024*1024*100;
-const DEFAULT_MAX_MESSAGE_SIZE : usize = 1024*1024*200;
+const DEFAULT_MAX_DATAFRAME_SIZE: usize = 1024 * 1024 * 100;
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024 * 200;
 
 #[cfg(any(feature = "sync", feature = "async"))]
 mod common_imports {
@@ -515,7 +515,14 @@ impl<'u> ClientBuilder<'u> {
 		// validate
 		self.validate(&response)?;
 
-		Ok(Client::unchecked_with_limits(reader, response.headers, true, false, self.max_dataframe_size, self.max_dataframe_size))
+		Ok(Client::unchecked_with_limits(
+			reader,
+			response.headers,
+			true,
+			false,
+			self.max_dataframe_size,
+			self.max_dataframe_size,
+		))
 	}
 
 	/// Connect to a websocket server asynchronously.
@@ -526,10 +533,10 @@ impl<'u> ClientBuilder<'u> {
 	///
 	/// If you have non-default SSL circumstances, you can use the `ssl_config`
 	/// parameter to configure those.
-	/// 
+	///
 	/// Note that if URL contains a hostname (like in the example below), it
 	/// uses only one of the resolved IP addresses, without ["happy eyeballs"](https://datatracker.ietf.org/doc/html/rfc8305).
-	/// This may lead to failures to connect to e.g. `ws://localhost`. 
+	/// This may lead to failures to connect to e.g. `ws://localhost`.
 	///
 	///# Example
 	///
@@ -617,7 +624,9 @@ impl<'u> ClientBuilder<'u> {
 	pub fn async_connect_with_cb(
 		self,
 		ssl_config: Option<TlsConnector>,
-		cb: impl FnOnce(url::SocketAddrs) -> Box<dyn future::Future<Item=TcpStreamNew, Error=WebSocketError> + Send>,
+		cb: impl FnOnce(
+			Vec<std::net::SocketAddr>,
+		) -> Box<dyn future::Future<Item = TcpStreamNew, Error = WebSocketError> + Send>,
 	) -> r#async::ClientNew<Box<dyn stream::r#async::Stream + Send>> {
 		// connect to the tcp stream
 		let tcp_stream = self.async_tcpstream_with_cb(None, cb);
@@ -856,7 +865,11 @@ impl<'u> ClientBuilder<'u> {
 			})
 			// output the final client and metadata
 			.map(move |(message, stream)| {
-				let codec = MessageCodec::new_with_limits(Context::Client, max_dataframe_size, max_message_size);
+				let codec = MessageCodec::new_with_limits(
+					Context::Client,
+					max_dataframe_size,
+					max_message_size,
+				);
 				let client = update_framed_codec(stream, codec);
 				(client, message.headers)
 			});
@@ -870,12 +883,9 @@ impl<'u> ClientBuilder<'u> {
 		secure: Option<bool>,
 	) -> Box<dyn future::Future<Item = TcpStreamNew, Error = WebSocketError> + Send> {
 		// get the address to connect to, return an error future if ther's a problem
-		let address = match self
-			.extract_host_port(secure)
-			.and_then(|p| Ok(p.to_socket_addrs()?))
-		{
-			Ok(mut s) => match s.next() {
-				Some(a) => a,
+		let address = match self.extract_host_port(secure) {
+			Ok(mut s) => match s.pop() {
+				Some(address) => address,
 				None => {
 					return Box::new(
 						Err(WebSocketOtherError::WebSocketUrlError(
@@ -897,13 +907,12 @@ impl<'u> ClientBuilder<'u> {
 	fn async_tcpstream_with_cb(
 		&self,
 		secure: Option<bool>,
-		cb: impl FnOnce(url::SocketAddrs) -> Box<dyn future::Future<Item=TcpStreamNew, Error=WebSocketError> + Send>,
+		cb: impl FnOnce(
+			Vec<std::net::SocketAddr>,
+		) -> Box<dyn future::Future<Item = TcpStreamNew, Error = WebSocketError> + Send>,
 	) -> Box<dyn future::Future<Item = TcpStreamNew, Error = WebSocketError> + Send> {
 		// get the address to connect to, return an error future if ther's a problem
-		match self
-			.extract_host_port(secure)
-			.and_then(|p| Ok(p.to_socket_addrs()?))
-		{
+		match self.extract_host_port(secure) {
 			Ok(s) => cb(s),
 			Err(e) => return Box::new(Err(e).into_future()),
 		}
@@ -959,7 +968,10 @@ impl<'u> ClientBuilder<'u> {
 		if status != StatusCode::SwitchingProtocols {
 			if status.is_redirection() {
 				match response.headers.get::<hyper::header::Location>() {
-					Some(x) => return Err(WebSocketOtherError::RedirectError(status, x.to_string())).map_err(towse),
+					Some(x) => {
+						return Err(WebSocketOtherError::RedirectError(status, x.to_string()))
+							.map_err(towse)
+					}
 					None => (),
 				}
 			}
@@ -1018,7 +1030,10 @@ impl<'u> ClientBuilder<'u> {
 	}
 
 	#[cfg(any(feature = "sync", feature = "async"))]
-	fn extract_host_port(&self, secure: Option<bool>) -> WebSocketResult<::url::HostAndPort<&str>> {
+	fn extract_host_port(
+		&self,
+		secure: Option<bool>,
+	) -> WebSocketResult<Vec<std::net::SocketAddr>> {
 		if self.url.host().is_none() {
 			return Err(WebSocketOtherError::WebSocketUrlError(
 				WSUrlErrorKind::NoHostName,
@@ -1026,23 +1041,30 @@ impl<'u> ClientBuilder<'u> {
 			.map_err(towse);
 		}
 
-		Ok(self.url.with_default_port(|url| {
-			const SECURE_PORT: u16 = 443;
-			const INSECURE_PORT: u16 = 80;
-			const SECURE_WS_SCHEME: &str = "wss";
+		self.url
+			.socket_addrs(|| {
+				const SECURE_PORT: u16 = 443;
+				const INSECURE_PORT: u16 = 80;
+				const SECURE_WS_SCHEME: &str = "wss";
 
-			Ok(match secure {
-				None if url.scheme() == SECURE_WS_SCHEME => SECURE_PORT,
-				None => INSECURE_PORT,
-				Some(true) => SECURE_PORT,
-				Some(false) => INSECURE_PORT,
+				Some(match secure {
+					None if self.url.scheme() == SECURE_WS_SCHEME => SECURE_PORT,
+					None => INSECURE_PORT,
+					Some(true) => SECURE_PORT,
+					Some(false) => INSECURE_PORT,
+				})
 			})
-		})?)
+			.map_err(|_| {
+				towse(WebSocketOtherError::WebSocketUrlError(
+					WSUrlErrorKind::InvalidScheme,
+				))
+			})
 	}
 
 	#[cfg(feature = "sync")]
 	fn establish_tcp(&mut self, secure: Option<bool>) -> WebSocketResult<TcpStream> {
-		Ok(TcpStream::connect(self.extract_host_port(secure)?)?)
+		let host_port = self.extract_host_port(secure)?;
+		Ok(TcpStream::connect(host_port.as_slice())?)
 	}
 
 	#[cfg(any(feature = "sync-ssl", feature = "async-ssl"))]

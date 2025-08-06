@@ -19,7 +19,7 @@ license = "MIT"
 [dependencies]
 hyper = {git = "https://github.com/bojankaios/hyper.git", branch = "0.10.x"}
 unicase = "2.0"
-url = "1.0"
+url = "2.0"
 rand = "0.7"
 futures = { version = "0.1", optional = true }
 tokio-io = { version = "0.1", optional = true }
